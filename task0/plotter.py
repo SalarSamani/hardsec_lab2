@@ -1,18 +1,39 @@
 import sys
 import matplotlib.pyplot as plt
 
-times = []
+hit_times = []
+miss_times = []
+
 for l in sys.stdin:
     triplet = l.split(",")
+    label = triplet[0]
     t = int(triplet[1])
-    times.append(t)
+    
+    if label == "hit":
+        hit_times.append(t)
+    elif label == "miss":
+        miss_times.append(t)
 
-if not times:
+if not hit_times and not miss_times:
     print("Task 0 not implemented it seems...")
     exit(1) 
 
-nr_bins = (max(times) - min(times) + 50) // 2
-plt.hist(times, bins=nr_bins)
+# Combine all times to determine bin range
+all_times = hit_times + miss_times
+if all_times:
+    nr_bins = (max(all_times) - min(all_times) + 50) // 2
+    
+    # Create histogram with both datasets
+    plt.hist([hit_times, miss_times], bins=nr_bins, 
+             color=['blue', 'orange'], 
+             label=['Cache Hit', 'Cache Miss'],
+             alpha=0.7)
+    
+    plt.legend()
+    plt.xlabel('Time (cycles)')
+    plt.ylabel('Frequency')
+    plt.title('Cache Hit vs Miss Timing Distribution')
+    
 plt.savefig("hist.png")
 print("Histogram saved as hist.png.")
 

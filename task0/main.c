@@ -57,14 +57,13 @@ int main(int argc, char** argv) {
     // cahce hit
     for (size_t i = 0; i < NUM_SAMPLES; i++) {
         size_t hit_time = cache_hit();
-        printf("0,%zu\n", hit_time);
+        printf("hit,%zu\n", hit_time);
     }
 
     // cache miss
     for (size_t i = 0; i < NUM_SAMPLES; i++) {
         size_t miss_time = cache_miss();
-        if (miss_time < 2000)  // filter outliers
-            printf("0,%zu\n", miss_time);
+        printf("miss,%zu\n", miss_time);
     }
     return 0;
 }
