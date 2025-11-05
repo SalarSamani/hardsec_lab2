@@ -67,14 +67,7 @@ int main() {
         leaked[offset] = (char)best_index;
     }
 
-    printf("Leaked secret: ");
-    for (int i = 0; i < 32; ++i) {
-        unsigned char c = leaked[i];
-        if (c >= 32 && c < 127) putchar(c);
-        else printf("\\x%02x", c);
-    }
-    putchar('\n');
-
+    printf("Secret: %s\n", leaked);
     close(fd);
     return 0;
 }
