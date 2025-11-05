@@ -12,7 +12,7 @@
 
 #define CACHELINE 64
 #define NUM_SAMPLES 10000
-#define ROUNDS 50
+#define ROUNDS 5
 
 char* buffer;
 
@@ -21,7 +21,7 @@ size_t cache_hit(void) {
     size_t min_time = SIZE_MAX;
     for (size_t i = 0; i < ROUNDS; i++) {
         *(volatile char*)buffer;
-        lfence();
+        mfence();
         cpuid();
         uint64_t t1 = rdtscp();
         *(volatile char*)buffer;
@@ -38,7 +38,7 @@ size_t cache_miss(void) {
     size_t min_time = SIZE_MAX;
     for (size_t i = 0; i < ROUNDS; i++) {
         clflush(buffer);
-        lfence();
+        mfence();
         cpuid();
         uint64_t t1 = rdtscp();
         *(volatile char*)buffer;
@@ -57,14 +57,15 @@ int main(int argc, char** argv) {
     // cahce hit
     for (size_t i = 0; i < NUM_SAMPLES; i++) {
         size_t hit_time = cache_hit();
-        printf("hit,%zu\n", hit_time);
+        if (hit_time < 400)
+            printf("hit,%zu\n", hit_time);
     }
 
     // cache miss
     for (size_t i = 0; i < NUM_SAMPLES; i++) {
         size_t miss_time = cache_miss();
-        printf("miss,%zu\n", miss_time);
+        if (miss_time < 400)
+            printf("miss,%zu\n", miss_time);
     }
     return 0;
 }
-
